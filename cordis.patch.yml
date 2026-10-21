@@ -1,3 +1,9 @@
 - insert:
     - id: tool-search
       name: dsh-tool-search
+      config:
+        threshold: 1
+        maxResults: 3
+        maxDiscovered: 6
+        residentCatalog: false
+        requireDiscovery: true

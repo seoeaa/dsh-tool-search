@@ -42,4 +42,5 @@ export interface ResolvedConfig {
   readonly charactersPerToken: number
   readonly descriptionChars: number
   readonly deferToolGuidance: boolean
+  readonly residentCatalog: boolean
 }

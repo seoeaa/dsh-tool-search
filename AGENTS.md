@@ -4,7 +4,7 @@ Guidance for coding agents working in this repository.
 
 ## Overview
 
-dsh-tool-search is a DeepSeek Harness (DSH) plugin providing vendor-style deferred tool loading. A resident system-prompt section lists every deferred tool with a one-line purpose; the tool_search tool returns full parameter schemas on demand; discovered tools are called directly, guarded by a monotonic require-discovery check.
+dsh-tool-search is a DeepSeek Harness (DSH) plugin providing vendor-style deferred tool loading. An optional resident system-prompt section lists deferred tools; the local bundle disables it so the catalog stays server-side; the tool_search tool returns full parameter schemas on demand; discovered tools are called directly, guarded by a monotonic require-discovery check.
 
 ## Layout
 
@@ -18,7 +18,7 @@ dsh-tool-search is a DeepSeek Harness (DSH) plugin providing vendor-style deferr
 
 ## Commands
 
-Supported host core baseline: 0.2.0-rc.1. Core peers are pinned; do not broaden without a compatibility run. Dependency duplication across release lines breaks cordis Context augmentation under skipLibCheck:false — keep the release-line overrides in pnpm-workspace.yaml aligned with the active DSH release.
+Supported local host core baseline: 0.2.1-alpha.5. Core peers are pinned; do not broaden without a compatibility run. Dependency duplication across release lines breaks cordis Context augmentation under skipLibCheck:false — keep the release-line overrides in pnpm-workspace.yaml aligned with the active DSH release.
 
     pnpm install          # pnpm 11, Node 22.19+ or 24+
     pnpm run typecheck    # tsc --noEmit

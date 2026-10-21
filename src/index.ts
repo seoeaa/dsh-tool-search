@@ -61,6 +61,8 @@ export interface Config {
   readonly descriptionChars?: number
   /** Remove exact hidden tool guidance sections from the stable prompt. */
   readonly deferToolGuidance?: boolean
+  /** Include names and purposes in the prompt; false keeps the catalog server-side. */
+  readonly residentCatalog?: boolean
 }
 
 export const Config = z.object({
@@ -73,6 +75,7 @@ export const Config = z.object({
   charactersPerToken: z.number().default(DEFAULT_CHARACTERS_PER_TOKEN),
   descriptionChars: z.number().default(DEFAULT_DESCRIPTION_CHARS),
   deferToolGuidance: z.boolean().default(DEFAULT_DEFER_TOOL_GUIDANCE),
+  residentCatalog: z.boolean().default(true),
 }) as unknown as z<Config>
 
 function nonEmpty(value: string, path: string): string {
@@ -109,6 +112,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     charactersPerToken: integer(config.charactersPerToken ?? DEFAULT_CHARACTERS_PER_TOKEN, 'charactersPerToken', 1),
     descriptionChars: integer(config.descriptionChars ?? DEFAULT_DESCRIPTION_CHARS, 'descriptionChars', 20),
     deferToolGuidance: config.deferToolGuidance ?? DEFAULT_DEFER_TOOL_GUIDANCE,
+    residentCatalog: config.residentCatalog ?? true,
   }
 }
 
@@ -364,8 +368,8 @@ export function apply(ctx: Context, input: Config): void {
 
   ctx.tools.register(defineTool({
     name: config.toolName,
-    description: 'Search deferred tools by capability. Only tool names and purposes are listed upfront; '
-      + 'this returns the full parameter schemas of the most relevant tools so they can be called directly.',
+    description: 'Search available tools by capability before choosing tools for a new task or operation. '
+      + 'This returns the full parameter schemas of the most relevant tools so they can be called directly.',
     parameters: {
       query: {
         type: 'string',
@@ -403,9 +407,10 @@ export function apply(ctx: Context, input: Config): void {
       const newly: string[] = []
       for (const match of matches) {
         if (!state.discovered.has(match.name)) {
-          state.discovered.add(match.name)
           newly.push(match.name)
         }
+        state.discovered.delete(match.name)
+        state.discovered.add(match.name)
       }
       // Bound the declared surface: unbounded discovery across a long session
       // would grow the request schemas back toward the full-resident baseline.
@@ -420,7 +425,7 @@ export function apply(ctx: Context, input: Config): void {
         allDiscoveredTools: [...state.discovered].sort(),
         instruction: matches.length > 0
           ? 'Call any returned tool directly by its exact name with arguments matching the returned parameters schema.'
-          : 'No tool matched. Rephrase the query with exact capability words, or consult the deferred tool catalog section of the prompt.',
+          : 'No tool matched. Search again with exact capability words, the service name, or English synonyms.',
       } as unknown as InferValue<typeof resultSchema>
     },
   }))
@@ -428,10 +433,14 @@ export function apply(ctx: Context, input: Config): void {
   ctx.systemPrompt.section({
     name: 'tool-search:discovery',
     order: 140,
-    text: 'Most tools are deferred: the prompt lists every deferred tool with a one-line purpose, but not'
-      + ' its parameter schema. When a deferred tool fits the task, call ' + config.toolName
-      + ' with a capability query to load the full schemas of the most relevant tools, then call the chosen'
-      + ' tool directly by its exact name. Do not claim a capability is unavailable before searching.',
+    text: 'Before choosing tools for a new task or capability, call ' + config.toolName
+      + ' with a focused capability query. The complete catalog stays server-side; tools absent from'
+      + ' the current declarations may still be available through search. Search with the action and'
+      + ' service name, preferably English keywords as well as the user language. Search returns full'
+      + ' schemas; call a returned tool directly by its exact name. Only a bounded set of recent'
+      + ' discoveries stays loaded: search again when changing capabilities or when a tool is no longer'
+      + ' declared. Reuse a loaded tool for the same operation. Do not claim a capability is unavailable'
+      + ' before searching. Tool execution still requires the ordinary permissions and approval checks.',
   })
 
   ctx.tools.guard((execution) => {
@@ -453,7 +462,7 @@ export function apply(ctx: Context, input: Config): void {
 
   ctx.on('system-prompt/assemble', async (assembly, context, next) => {
     const resolved = await next()
-    const agent = context.agent
+    const agent = (context.scope ?? (context as { agent?: Agent }).agent) as Agent | undefined
     if (agent === undefined) return resolved
     const state = prepareState(agent)
     const deferred = belowThreshold(state)
@@ -462,16 +471,19 @@ export function apply(ctx: Context, input: Config): void {
     const visibleNames = deferred.size === 0
       ? new Set(state.agent.ctx.tools.schemas(state.agent).map(schema => schema.name))
       : new Set<string>([...state.stableNames, 'run_code'])
+    const sdkNames = new Set([...visibleNames, ...state.discovered])
+    const codeOnly = resolved.tools.some(schema => schema.name === 'run_code')
+      && resolved.sections.some(section => section.name === 'tools:sdk')
     const sections = resolved.sections
       .filter(section => !config.deferToolGuidance || !exactGuidanceForDeferredTool(section.name, deferred))
       .map(section => section.name === 'tools:sdk'
-        ? { ...section, text: shapeSdkSection(state, visibleNames, section.text) }
+        ? { ...section, text: shapeSdkSection(state, sdkNames, section.text) }
         : section)
-    if (deferred.size > 0) {
+    if (deferred.size > 0 && config.residentCatalog) {
       sections.push({ name: 'tool-search:catalog', text: catalogSectionText(state.catalog, config) })
     }
     const tools = resolved.tools.filter(schema => visibleNames.has(schema.name))
-    if (deferred.size > 0) {
+    if (deferred.size > 0 && !codeOnly) {
       // Discovered schemas must be declared in the request surface: a model can
       // only emit native calls for tools it sees as declarations, so schemas
       // returned as search-result text alone are not callable. The loop logs
@@ -507,6 +519,7 @@ export function apply(ctx: Context, input: Config): void {
     const value = searchValueFromExecution(result)
     if (value === undefined) return
     for (const discovered of discoveredFromValue(value) ?? []) state.discovered.add(discovered)
+    clampDiscovered(state.discovered, config.maxDiscovered)
   })
 
   ctx.on('tools/change', () => {

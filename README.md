@@ -1,84 +1,135 @@
 # dsh-tool-search
 
-Vendor-style deferred tool loading for DeepSeek Harness. Mirrors the deferred-loading model of provider-hosted tool search: every deferrable tool contributes only its name and purpose to the stable request surface, the discovery tool returns full parameter schemas on demand, and discovered tools are called directly through the ordinary Harness execution pipeline.
+**English** | [Русский](README.ru.md)
 
-## 简介（中文）
+Search and load tools on demand in DeepSeek Harness. Keep the full catalog on the server and send only the tools needed for the current work to the agent.
 
-dsh-tool-search 是一个 DeepSeek Harness（DSH）插件，为工具注册表提供厂商风格的**延迟加载（deferred tool loading）**能力。
+This fork extends [lordqyxz/dsh-tool-search](https://github.com/lordqyxz/dsh-tool-search) with a compact default configuration and compatibility with Harness **0.2.1-alpha.5**.
 
-它解决的问题：当宿主注册的工具数量很多时，把所有工具的完整参数 Schema 常驻在请求里会占用大量上下文。本插件的做法是：
+## How it works
 
-- **常驻目录区** — 系统提示词中每个可延迟工具只保留一行「名称 + 截断用途」，注册表不变时字节数完全稳定。
-- **搜索展开 Schema** — 注册一个 `tool_search` 发现工具，用精确名加权 + 紧凑 BM25 风格打分（支持 CJK 二元分词）对工具排序，只返回最相关工具的完整参数 Schema。
-- **发现后直接调用** — 没有调度器转发。已发现的工具按精确名称直接调用，走完整的宿主执行管线（校验、审批、守卫、超时、结果策略）；单调递增的守卫会拒绝未发现工具的直接调用，并提示自愈路径（先搜索）。
-- **按工具发现** — 一次搜索只解锁返回的工具名，不解锁整个工具族。
-- **阈值惰性** — 可延迟工具数低于配置阈值时插件完全惰性，所有工具保持全量可见。
-- **可恢复** — 发现状态基于事件溯源：搜索结果在 presentation meta 中携带累积发现列表，重建的 agent 状态可从会话日志恢复。
+1. The agent starts with `tool_search` and essential tools such as `skill` and `ask_user_question`.
+2. Before choosing tools for a new task or capability, the agent searches by action and service name.
+3. Search returns up to **3 matching tools**, including their parameter schemas.
+4. The agent calls the selected tool by its original name through the normal Harness execution pipeline.
+5. Up to **6 discovered tools** remain loaded per agent. Older discoveries yield to newer ones; search again to load them when needed.
 
-## Semantics
+The full catalog, including names and descriptions, stays out of the prompt by default. Search runs locally over the tools visible to the calling agent, including MCP tools, and needs no extra API key.
 
-- **Resident catalog section.** The system prompt lists every deferred tool as one line: name plus a truncated purpose. Bytes stay stable while the tool registry is unchanged; a registry change rebuilds the section.
-- **Search expands schemas.** The registered search tool ranks individual tools with exact-name bonuses plus a compact BM25-style score over names, descriptions, and parameter text, and returns full parameter schemas for the top matches. CJK queries tokenize through character bigrams.
-- **Direct calls after discovery.** There is no dispatcher. A discovered tool is called by its exact name and re-enters the full pipeline (validation, approval, guards, timeouts, result policy). A monotonic guard denies direct calls to deferred tools that have not been discovered and names the self-healing next step.
-- **Per-tool discovery.** One search unlocks exactly the returned tool names, never a family.
-- **Threshold.** Below the configured threshold of deferrable tools the plugin is inert: all tools stay fully visible and the search tool reports that nothing is deferred.
-- **Resume.** Discovery state is event-sourced: the search result carries a cumulative discovered list in presentation meta, and a rebuilt agent state restores it from the session log.
+Calls to undiscovered deferred tools are denied with a hint to search first. Repeated use of an already loaded tool does not require another search. Validation, permissions, approvals, guards and timeouts still apply.
 
-The reserved run_code transport stays exempt from deferral and the guard.
+## Installation
 
-## Config
+Requires Harness **0.2.1-alpha.5**, Cordis **4.0.5**, and Node.js **22.19+ on the 22.x line, or 24+**. Other Harness versions have not been verified.
 
-| Field | Default | Meaning |
+In the Harness plugin manager, install this package URL and enable the bundle:
+
+```text
+https://github.com/seoeaa/dsh-tool-search/releases/download/v0.1.1/dsh-tool-search-0.1.1.tgz
+```
+
+The release archive contains compiled JavaScript and type declarations. Do not enable another plugin that registers `tool_search` at the same time.
+
+To develop or install from source:
+
+```bash
+git clone https://github.com/seoeaa/dsh-tool-search.git
+cd dsh-tool-search
+pnpm install --frozen-lockfile
+pnpm run build
+```
+
+Install the resulting local directory through the Harness plugin manager. Hot application depends on the host's HMR support; check the manager's application result.
+
+## Configuration
+
+The bundled `cordis.patch.yml` enables this configuration:
+
+```yaml
+- insert:
+    - id: tool-search
+      name: dsh-tool-search
+      config:
+        threshold: 1
+        maxResults: 3
+        maxDiscovered: 6
+        residentCatalog: false
+        requireDiscovery: true
+```
+
+Use the plugin's configuration in Harness to change these values.
+
+| Setting | Bundle value | Meaning |
 | --- | --- | --- |
-| toolName | tool_search | Registered discovery tool name |
-| alwaysVisible | skill, ask_user_question, report, submit_*, structured_output* | Wildcard patterns whose full schemas stay directly visible (deferrable: never) |
-| threshold | 15 | Deferred loading activates at or above this many deferrable tools |
-| maxResults | 5 | Maximum full definitions returned by one search |
-| maxDiscovered | 20 | Upper bound on tools declared after discovery; oldest discoveries yield first (floored at maxResults) |
-| requireDiscovery | true | Deny direct calls to undiscovered deferred tools |
-| charactersPerToken | 4 | Schema characters per estimated token |
-| descriptionChars | 110 | Per-tool purpose cap in the resident catalog section |
-| deferToolGuidance | true | Strip per-tool guidance prompt sections of the stable prompt |
+| `toolName` | `tool_search` | Discovery tool name. |
+| `alwaysVisible` | `skill`, `ask_user_question`, `report`, `submit_*`, `structured_output*` | Patterns for tools available without discovery. |
+| `threshold` | `1` | Minimum number of deferrable tools needed to activate filtering. |
+| `maxResults` | `3` | Maximum full schemas returned by one search. |
+| `maxDiscovered` | `6` | Maximum discovered tools kept loaded; never lower than `maxResults`. |
+| `residentCatalog` | `false` | Include deferred names and short descriptions in the prompt when enabled. |
+| `requireDiscovery` | `true` | Deny direct calls to undiscovered deferred tools. |
+| `charactersPerToken` | `4` | Characters per token for schema cost estimates. |
+| `descriptionChars` | `110` | Description limit in the optional resident catalog. |
+| `deferToolGuidance` | `true` | Remove prompt sections dedicated to hidden tools. |
 
-alwaysVisible is a replacement list: keep the defaults when extending it.
+These are the effective **bundle settings**. Direct users of `apply()` retain the upstream fallback values: `threshold: 15`, `maxResults: 5`, `maxDiscovered: 20`, `residentCatalog: true`.
 
-## Efficiency / 效率对比
+`alwaysVisible` replaces the default list; preserve the default patterns when extending it. The reserved `run_code` transport remains exempt from deferral.
 
-方法：120 个合成工具（12 领域 × 10 操作）的真实 JSON Schema。基线 = 全量 Schema 常驻；对比 = 目录区常驻 + 按需搜索。
+## Search example
 
-| Tools | 基线 tok/请求 | 插件 tok/请求 | 常驻节省 | 单次搜索 tok | 回本搜索次数 | Top-1（名称） | R@5（同义改写） | 搜索延迟 |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 15 | 1849 | 596 | 67.8% | 755 | 1 | 100% | 100% | 108 µs |
-| 30 | 3706 | 1025 | 72.3% | 756 | 1 | 100% | 100% | 213 µs |
-| 60 | 7347 | 1820 | 75.2% | 756 | 1 | 100% | 100% | 454 µs |
-| 120 | 14632 | 3417 | 76.6% | 756 | 1 | 100% | 100% | 986 µs |
+Search by capability:
 
-<sub>基准：[bench/run-benchmark.mjs](bench/run-benchmark.mjs) · 回归守护：[tests/efficiency.spec.ts](tests/efficiency.spec.ts) · 复现：`pnpm run bench`</sub>
+```json
+{"query":"read text file first lines","max_results":1}
+```
 
-- **1 次搜索即回本**：省下的常驻开销一次搜索就覆盖其自身成本，此后每次请求持续净省。
-- **质量**：精确名称查询全部排第一；不含名称词的同义改写查询 100% 命中 Top-5。
+If the result contains the built-in `read` tool, call it using the returned schema:
+
+```json
+{"file_path":"README.md","offset":1,"limit":20}
+```
+
+Use precise action words, a service name or an exact tool name. English keywords help when descriptions are in English. Search is lexical: rephrase a query when results do not match the intended capability.
+
+## Changes from upstream
+
+- Adapted prompt assembly to `AssembleContext.scope`, with a fallback for the earlier `agent` context shape.
+- Added `residentCatalog: false` to keep names and descriptions on the server too.
+- Configured bounded discovery by default; repeated search refreshes discovery order.
+- Kept discovered schemas in the SDK for programmatic tool calling, without declaring native calls alongside `run_code`.
+- Aligned dependencies and overrides with the verified host release.
+- Added English and Russian documentation.
+
+Discovery state is isolated per agent and can be restored from successful search results in session events. See [CHANGELOG.md](CHANGELOG.md).
+
+## Verification and limits
+
+The adaptation passed the build, type checking and **17 existing upstream checks**. A live native session completed `tool_search` → `read` → file content. Checks also covered separate state for two agents, bounded declarations, eviction, rediscovery and normal runtime guards after discovery.
+
+In one local verification, the initial tool-schema JSON changed from **674 schemas / 1,230,070 bytes** to **3 schemas / 2,093 bytes**. After one search it contained **4 schemas / 2,711 bytes**. These are observed tool-section sizes, not a guarantee for every installation or a measurement of the whole request.
+
+- A selected tool can still have a large schema: the cap limits tool count, not bytes.
+- Earlier results and conversation history remain in existing sessions until ordinary compaction removes them.
+- Native execution was verified. SDK assembly was checked for programmatic tool calling; full execution in that mode was not tested.
+- A tool may be discoverable while its service, executable or credentials are unavailable.
+- Disabling the bundle restores ordinary tool presentation; MCP registrations are preserved.
 
 ## Development
 
+Use pnpm **11.19.0**. Keep the dependency release line and `pnpm-workspace.yaml` overrides aligned.
+
 ```bash
-pnpm install          # pnpm 11, Node 22.19+ or 24+
-pnpm run typecheck    # tsc --noEmit
-pnpm run lint         # oxlint src tests
-pnpm run test         # vitest run
-pnpm run bench        # build + efficiency benchmark
-pnpm run build        # tsc -> lib/
-pnpm run check        # typecheck + lint + test + build
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm run lint
+pnpm run test
+pnpm run build
+pnpm run bench
 ```
 
-## Limitations
+Existing upstream tests are retained. The benchmark uses synthetic schemas and does not represent every real catalog.
 
-- Ranking is lexical; vocabulary gaps (repository vs project, remember vs save) can misrank. The resident catalog section keeps every name and purpose visible so the model can search again with exact words.
-- Descriptions are inputs to ranking; tools with empty or generic descriptions rank poorly.
+## License and origin
 
-## License
-
-[MIT](LICENSE)
-
-## Tags
-
-`deepseek-harness` · `dsh` · `cordis` · `tool-search` · `deferred-loading` · `tool-deferral` · `context-optimization` · `token-optimization` · `system-prompt` · `plugin` · `typescript`
+[MIT](LICENSE). Original project: [lordqyxz/dsh-tool-search](https://github.com/lordqyxz/dsh-tool-search), based on commit `2a6362bfbb9f6ac17dede5ee5bba24068bf1f239`. Original copyright and license notices are preserved.
